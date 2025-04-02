@@ -193,16 +193,30 @@ public class RecordService extends Service {
      */
     private void handleStopRecording() {
         Log.d(TAG, "handleStopRecording");
+        
+        // First signal that recording should stop
         isRecording = false;
-        isProcessing.set(false);
-
-        // 停止音频录制
+        
+        // Stop audio recording first
         AudioRecordManager.Controller.stop();
-
-        if (encoder != null) {
-            encoder.signalEndOfInputStream();
+        
+        // Wait for any pending frames to be encoded
+        try {
+            if (encoder != null) {
+                encoder.signalEndOfInputStream();
+                // Give some time for the encoder to process remaining frames
+                Thread.sleep(500);
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "Error signaling end of stream", e);
         }
-
+        
+        // Now we can stop processing
+        isProcessing.set(false);
+        
+        // Release resources
+        releaseEncoderResources();
+        
         mainHandler.post(() -> stopForeground(true));
     }
 
@@ -258,14 +272,19 @@ public class RecordService extends Service {
      */
     private void startEncodingLoop() {
         new Thread(() -> {
-            while (isProcessing.get()) {
-                if (!encodeFrame()) {
-                    break;
+            try {
+                while (isProcessing.get()) {
+                    if (!encodeFrame()) {
+                        break;
+                    }
                 }
+            } catch (Exception e) {
+                Log.e(TAG, "Error in encoding loop", e);
+            } finally {
+                releaseEncoderResources();
+                Log.i(TAG, "Encoding thread finished");
             }
-            releaseEncoderResources();
-            Log.i(TAG, "Encoding thread finished");
-        }).start();
+        }, "EncodingThread").start();
     }
 
     /**
@@ -273,7 +292,9 @@ public class RecordService extends Service {
      * @return 是否成功编码帧
      */
     private boolean encodeFrame() {
-        if (!isRecording) return false;
+        if (encoder == null || !isRecording) {
+            return false;
+        }
 
         MediaCodec.BufferInfo bufferInfo = new MediaCodec.BufferInfo();
         int outputBufferId = encoder.dequeueOutputBuffer(bufferInfo, TIMEOUT_US);
@@ -310,16 +331,14 @@ public class RecordService extends Service {
             bufferInfo.size = 0;
         }
 
-        if (bufferInfo.size != 0) {
-            if (muxerStarted) {
-                encodedData.position(bufferInfo.offset);
-                encodedData.limit(bufferInfo.offset + bufferInfo.size);
-                mediaMuxer.writeSampleData(videoTrackIndex, encodedData, bufferInfo);
-            }
+        if (bufferInfo.size > 0 && muxerStarted) {
+            encodedData.position(bufferInfo.offset);
+            encodedData.limit(bufferInfo.offset + bufferInfo.size);
+            mediaMuxer.writeSampleData(videoTrackIndex, encodedData, bufferInfo);
         }
 
         encoder.releaseOutputBuffer(outputBufferId, false);
-        return (bufferInfo.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) == 0;
+        return true;
     }
 
     /**
