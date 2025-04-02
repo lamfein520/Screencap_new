@@ -23,6 +23,8 @@ import android.os.Message;
 import android.util.Log;
 import android.view.Surface;
 
+import com.example.screepcap.manager.AudioRecordManager;
+
 import java.io.File;
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -54,6 +56,9 @@ public class RecordService extends Service {
     private MediaMuxer mediaMuxer;             // 视频封装器，用于生成 MP4 文件
     private Surface inputSurface;              // 输入surface，接收屏幕内容
     
+    // 音频相关
+    private int audioTrackIndex = -1;        // 音频轨道索引
+
     // 线程和Handler
     private HandlerThread handlerThread;        // 录制线程
     private Handler recordHandler;              // 录制线程的Handler
@@ -135,6 +140,16 @@ public class RecordService extends Service {
         screenHeight = height;
         screenDensity = density;
         mediaProjection.registerCallback(mediaProjectionCallback, mainHandler);
+
+        // 初始化音频录制
+        AudioRecordManager.Controller.init(this, mediaProjection, new AudioRecordManager.AudioDataCallback() {
+            @Override
+            public void onAudioData(ByteBuffer buffer, MediaCodec.BufferInfo bufferInfo) {
+                if (muxerStarted && audioTrackIndex >= 0) {
+                    mediaMuxer.writeSampleData(audioTrackIndex, buffer, bufferInfo);
+                }
+            }
+        });
     }
 
     /**
@@ -167,6 +182,8 @@ public class RecordService extends Service {
             createVirtualDisplay();
             isRecording = true;
             isProcessing.set(true);
+            // 启动音频录制
+            AudioRecordManager.Controller.start();
             startEncodingLoop();
         }
     }
@@ -178,6 +195,9 @@ public class RecordService extends Service {
         Log.d(TAG, "handleStopRecording");
         isRecording = false;
         isProcessing.set(false);
+
+        // 停止音频录制
+        AudioRecordManager.Controller.stop();
 
         if (encoder != null) {
             encoder.signalEndOfInputStream();
@@ -198,16 +218,17 @@ public class RecordService extends Service {
         Log.d(TAG, "Output file: " + outputPath);
 
         try {
-            MediaFormat format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, 
+            // 准备视频编码器
+            MediaFormat videoFormat = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, 
                     screenWidth, screenHeight);
-            format.setInteger(MediaFormat.KEY_COLOR_FORMAT, 
+            videoFormat.setInteger(MediaFormat.KEY_COLOR_FORMAT, 
                     MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface);
-            format.setInteger(MediaFormat.KEY_BIT_RATE, 5 * 1024 * 1024);
-            format.setInteger(MediaFormat.KEY_FRAME_RATE, 30);
-            format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1);
+            videoFormat.setInteger(MediaFormat.KEY_BIT_RATE, 5 * 1024 * 1024);
+            videoFormat.setInteger(MediaFormat.KEY_FRAME_RATE, 30);
+            videoFormat.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1);
 
             encoder = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC);
-            encoder.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
+            encoder.configure(videoFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
             inputSurface = encoder.createInputSurface();
             encoder.start();
 
@@ -265,6 +286,13 @@ public class RecordService extends Service {
             }
             MediaFormat newFormat = encoder.getOutputFormat();
             videoTrackIndex = mediaMuxer.addTrack(newFormat);
+            
+            // 添加音频轨道
+            MediaFormat audioFormat = AudioRecordManager.Controller.getFormat();
+            if (audioFormat != null) {
+                audioTrackIndex = mediaMuxer.addTrack(audioFormat);
+            }
+            
             mediaMuxer.start();
             muxerStarted = true;
             return true;
@@ -301,6 +329,7 @@ public class RecordService extends Service {
         Log.d(TAG, "releaseEncoderResources");
         muxerStarted = false;
         videoTrackIndex = -1;
+        audioTrackIndex = -1;
 
         if (virtualDisplay != null) {
             virtualDisplay.release();
@@ -316,6 +345,9 @@ public class RecordService extends Service {
             }
             encoder = null;
         }
+
+        // 释放音频资源
+        AudioRecordManager.Controller.release();
 
         if (mediaMuxer != null) {
             try {
