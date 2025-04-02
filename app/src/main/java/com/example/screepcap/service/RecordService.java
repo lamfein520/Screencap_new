@@ -7,7 +7,10 @@ import android.app.Service;
 import android.content.Intent;
 import android.hardware.display.DisplayManager;
 import android.hardware.display.VirtualDisplay;
-import android.media.MediaRecorder;
+import android.media.MediaCodec;
+import android.media.MediaCodecInfo;
+import android.media.MediaFormat;
+import android.media.MediaMuxer;
 import android.media.projection.MediaProjection;
 import android.os.Binder;
 import android.os.Build;
@@ -18,49 +21,70 @@ import android.os.IBinder;
 import android.os.Looper;
 import android.os.Message;
 import android.util.Log;
-
-import androidx.annotation.NonNull;
-import androidx.annotation.Nullable;
-import androidx.core.app.NotificationCompat;
+import android.view.Surface;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Locale;
+import java.util.concurrent.atomic.AtomicBoolean;
 
+/**
+ * 屏幕录制服务
+ * 使用 MediaCodec 进行视频编码，MediaMuxer 生成 MP4 文件
+ */
 public class RecordService extends Service {
     private static final String TAG = "RecordService";
+    private static final String CHANNEL_ID = "ScreenRecording";
     private static final int NOTIFICATION_ID = 1;
-    private static final String CHANNEL_ID = "screen_record_channel";
-    private static final int MSG_START_RECORDING = 1;
-    private static final int MSG_STOP_RECORDING = 2;
+    // Handler 消息类型
+    private static final int MSG_START_RECORDING = 0;
+    private static final int MSG_STOP_RECORDING = 1;
+    // MediaCodec 编码超时时间，单位：微秒
+    private static final int TIMEOUT_US = 10000;
+
+    // 屏幕捕获相关
+    private MediaProjection mediaProjection;    // 用于获取屏幕内容
+    private VirtualDisplay virtualDisplay;      // 虚拟显示器，用于承载屏幕内容
     
-    private Boolean isRecording = false;
-    private MediaProjection mediaProjection;
-    private MediaRecorder mediaRecorder;
-    private VirtualDisplay virtualDisplay;
-    private int screenWidth;
-    private int screenHeight;
-    private int screenDensity;
+    // 视频编码相关
+    private MediaCodec encoder;                 // 视频编码器
+    private MediaMuxer mediaMuxer;             // 视频封装器，用于生成 MP4 文件
+    private Surface inputSurface;              // 输入surface，接收屏幕内容
     
-    private HandlerThread handlerThread;
-    private Handler recordHandler;
-    private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    // 线程和Handler
+    private HandlerThread handlerThread;        // 录制线程
+    private Handler recordHandler;              // 录制线程的Handler
+    private Handler mainHandler;                // 主线程Handler
     
+    // 屏幕参数
+    private int screenWidth;                    // 屏幕宽度
+    private int screenHeight;                   // 屏幕高度
+    private int screenDensity;                  // 屏幕密度
+    
+    // 状态标志
+    private boolean isRecording;                // 是否正在录制
+    private int videoTrackIndex = -1;          // 视频轨道索引
+    private boolean muxerStarted = false;       // 是否已开始封装视频
+    private final AtomicBoolean isProcessing = new AtomicBoolean(false);  // 是否正在处理视频帧
+    private String outputPath;                  // 输出文件路径
+
+    // 用于Activity绑定服务
     private final IBinder binder = new RecordBinder();
     
+    // MediaProjection 回调，用于处理屏幕录制被系统取消的情况
     private final MediaProjection.Callback mediaProjectionCallback = new MediaProjection.Callback() {
         @Override
         public void onStop() {
-            mainHandler.post(() -> {
-                if (isRecording) {
-                    stopRecording();
-                }
-            });
+            stopRecording();
         }
     };
-    
+
+    /**
+     * Binder类，用于Activity和Service通信
+     */
     public class RecordBinder extends Binder {
         public RecordService getService() {
             return RecordService.this;
@@ -70,15 +94,16 @@ public class RecordService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
+        Log.d(TAG, "onCreate");
         createNotificationChannel();
         startForeground(NOTIFICATION_ID, createNotification());
-        
+
         // 初始化录制线程
-        handlerThread = new HandlerThread("RecordThread");
+        handlerThread = new HandlerThread("RecordingThread");
         handlerThread.start();
         recordHandler = new Handler(handlerThread.getLooper()) {
             @Override
-            public void handleMessage(@NonNull Message msg) {
+            public void handleMessage(Message msg) {
                 switch (msg.what) {
                     case MSG_START_RECORDING:
                         handleStartRecording();
@@ -89,134 +114,264 @@ public class RecordService extends Service {
                 }
             }
         };
+        mainHandler = new Handler(Looper.getMainLooper());
     }
 
-    @Nullable
     @Override
     public IBinder onBind(Intent intent) {
         return binder;
     }
 
-    private void createNotificationChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            NotificationChannel channel = new NotificationChannel(
-                    CHANNEL_ID,
-                    "Screen Record Service",
-                    NotificationManager.IMPORTANCE_DEFAULT
-            );
-            NotificationManager manager = getSystemService(NotificationManager.class);
-            if (manager != null) {
-                manager.createNotificationChannel(channel);
-            }
-        }
-    }
-
-    private Notification createNotification() {
-        NotificationCompat.Builder builder = new NotificationCompat.Builder(this, CHANNEL_ID)
-                .setContentTitle("Screen Recording")
-                .setContentText("Recording in progress...")
-                .setSmallIcon(android.R.drawable.ic_dialog_info);
-        return builder.build();
-    }
-
+    /**
+     * 设置屏幕录制配置
+     * @param projection MediaProjection 对象
+     * @param width 屏幕宽度
+     * @param height 屏幕高度
+     * @param density 屏幕密度
+     */
     public void setConfig(MediaProjection projection, int width, int height, int density) {
-        this.mediaProjection = projection;
-        this.screenWidth = width;
-        this.screenHeight = height;
-        this.screenDensity = density;
-        if (this.mediaProjection != null) {
-            this.mediaProjection.registerCallback(mediaProjectionCallback, mainHandler);
-        }
+        mediaProjection = projection;
+        screenWidth = width;
+        screenHeight = height;
+        screenDensity = density;
+        mediaProjection.registerCallback(mediaProjectionCallback, mainHandler);
     }
 
+    /**
+     * 开始屏幕录制
+     * @return 是否成功开始录制
+     */
     public boolean startRecording() {
-        if (isRecording || mediaProjection == null) {
-            return false;
-        }
-        
-        // 重新启动前台服务
-        startForeground(NOTIFICATION_ID, createNotification());
-        recordHandler.sendEmptyMessage(MSG_START_RECORDING);
-        return true;
-    }
-
-    private void handleStartRecording() {
-        try {
-            initRecorder();
-            createVirtualDisplay();
-            mediaRecorder.start();
-            mainHandler.post(() -> isRecording = true);
-        } catch (Exception e) {
-            Log.e(TAG, "handleStartRecording error: " + e.getMessage());
-            handleStopRecording();
-        }
-    }
-
-    public void stopRecording() {
         if (!isRecording) {
-            return;
+            recordHandler.sendEmptyMessage(MSG_START_RECORDING);
+            return true;
         }
-        recordHandler.sendEmptyMessage(MSG_STOP_RECORDING);
+        return false;
     }
 
+    /**
+     * 停止屏幕录制
+     */
+    public void stopRecording() {
+        if (isRecording) {
+            recordHandler.sendEmptyMessage(MSG_STOP_RECORDING);
+        }
+    }
+
+    /**
+     * 处理开始录制消息
+     */
+    private void handleStartRecording() {
+        Log.d(TAG, "handleStartRecording");
+        if (prepareEncoder()) {
+            createVirtualDisplay();
+            isRecording = true;
+            isProcessing.set(true);
+            startEncodingLoop();
+        }
+    }
+
+    /**
+     * 处理停止录制消息
+     */
     private void handleStopRecording() {
-        try {
-            if (mediaRecorder != null) {
-                mediaRecorder.stop();
-                mediaRecorder.reset();
-                mediaRecorder.release();
-                mediaRecorder = null;
-            }
-        } catch (Exception e) {
-            Log.e(TAG, "handleStopRecording error: " + e.getMessage());
+        Log.d(TAG, "handleStopRecording");
+        isRecording = false;
+        isProcessing.set(false);
+
+        if (encoder != null) {
+            encoder.signalEndOfInputStream();
         }
 
-        if (virtualDisplay != null) {
-            virtualDisplay.release();
-            virtualDisplay = null;
-        }
-        
-        mainHandler.post(() -> {
-            isRecording = false;
-            stopForeground(true); // 只停止前台服务，不停止服务本身
-        });
+        mainHandler.post(() -> stopForeground(true));
     }
 
-    private void initRecorder() {
-        mediaRecorder = new MediaRecorder();
-        
+    /**
+     * 准备视频编码器
+     * @return 是否成功准备编码器
+     */
+    private boolean prepareEncoder() {
         String fileName = new SimpleDateFormat("yyyy-MM-dd_HH-mm-ss", Locale.getDefault())
                 .format(new Date()) + ".mp4";
         File file = new File(getExternalFilesDir(Environment.DIRECTORY_MOVIES), fileName);
-
-        mediaRecorder.setVideoSource(MediaRecorder.VideoSource.SURFACE);
-        mediaRecorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4);
-        mediaRecorder.setVideoEncoder(MediaRecorder.VideoEncoder.H264);
-        mediaRecorder.setVideoSize(screenWidth, screenHeight);
-        mediaRecorder.setVideoFrameRate(30);
-        mediaRecorder.setVideoEncodingBitRate(5 * 1024 * 1024);
-        mediaRecorder.setOutputFile(file.getAbsolutePath());
+        outputPath = file.getAbsolutePath();
+        Log.d(TAG, "Output file: " + outputPath);
 
         try {
-            mediaRecorder.prepare();
+            MediaFormat format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, 
+                    screenWidth, screenHeight);
+            format.setInteger(MediaFormat.KEY_COLOR_FORMAT, 
+                    MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface);
+            format.setInteger(MediaFormat.KEY_BIT_RATE, 5 * 1024 * 1024);
+            format.setInteger(MediaFormat.KEY_FRAME_RATE, 30);
+            format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1);
+
+            encoder = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC);
+            encoder.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
+            inputSurface = encoder.createInputSurface();
+            encoder.start();
+
+            mediaMuxer = new MediaMuxer(outputPath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4);
+            return true;
         } catch (IOException e) {
-            Log.e(TAG, "initRecorder error: " + e.getMessage());
-            throw new RuntimeException("Failed to prepare MediaRecorder", e);
+            Log.e(TAG, "prepareEncoder error: " + e.getMessage());
+            releaseEncoderResources();
+            return false;
         }
     }
 
+    /**
+     * 创建虚拟显示器
+     */
     private void createVirtualDisplay() {
         virtualDisplay = mediaProjection.createVirtualDisplay(
                 "ScreenRecording",
                 screenWidth, screenHeight, screenDensity,
                 DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-                mediaRecorder.getSurface(), null, null
+                inputSurface, null, null
         );
+    }
+
+    /**
+     * 启动视频编码线程
+     */
+    private void startEncodingLoop() {
+        new Thread(() -> {
+            while (isProcessing.get()) {
+                if (!encodeFrame()) {
+                    break;
+                }
+            }
+            releaseEncoderResources();
+            Log.i(TAG, "Encoding thread finished");
+        }).start();
+    }
+
+    /**
+     * 编码视频帧
+     * @return 是否成功编码帧
+     */
+    private boolean encodeFrame() {
+        if (!isRecording) return false;
+
+        MediaCodec.BufferInfo bufferInfo = new MediaCodec.BufferInfo();
+        int outputBufferId = encoder.dequeueOutputBuffer(bufferInfo, TIMEOUT_US);
+
+        if (outputBufferId == MediaCodec.INFO_TRY_AGAIN_LATER) {
+            return true;
+        } else if (outputBufferId == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+            if (muxerStarted) {
+                return false;
+            }
+            MediaFormat newFormat = encoder.getOutputFormat();
+            videoTrackIndex = mediaMuxer.addTrack(newFormat);
+            mediaMuxer.start();
+            muxerStarted = true;
+            return true;
+        } else if (outputBufferId < 0) {
+            Log.w(TAG, "Unexpected result from encoder.dequeueOutputBuffer: " + outputBufferId);
+            return true;
+        }
+
+        ByteBuffer encodedData = encoder.getOutputBuffer(outputBufferId);
+        if (encodedData == null) {
+            return false;
+        }
+
+        if ((bufferInfo.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0) {
+            bufferInfo.size = 0;
+        }
+
+        if (bufferInfo.size != 0) {
+            if (muxerStarted) {
+                encodedData.position(bufferInfo.offset);
+                encodedData.limit(bufferInfo.offset + bufferInfo.size);
+                mediaMuxer.writeSampleData(videoTrackIndex, encodedData, bufferInfo);
+            }
+        }
+
+        encoder.releaseOutputBuffer(outputBufferId, false);
+        return (bufferInfo.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) == 0;
+    }
+
+    /**
+     * 释放视频编码资源
+     */
+    private void releaseEncoderResources() {
+        Log.d(TAG, "releaseEncoderResources");
+        muxerStarted = false;
+        videoTrackIndex = -1;
+
+        if (virtualDisplay != null) {
+            virtualDisplay.release();
+            virtualDisplay = null;
+        }
+
+        if (encoder != null) {
+            try {
+                encoder.stop();
+                encoder.release();
+            } catch (Exception e) {
+                Log.e(TAG, "releaseEncoderResources encoder error: " + e.getMessage());
+            }
+            encoder = null;
+        }
+
+        if (mediaMuxer != null) {
+            try {
+                if (muxerStarted) {
+                    mediaMuxer.stop();
+                }
+                mediaMuxer.release();
+            } catch (Exception e) {
+                Log.e(TAG, "releaseEncoderResources muxer error: " + e.getMessage());
+            }
+            mediaMuxer = null;
+        }
+
+        if (inputSurface != null) {
+            inputSurface.release();
+            inputSurface = null;
+        }
+    }
+
+    /**
+     * 创建通知渠道
+     */
+    private void createNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            NotificationChannel channel = new NotificationChannel(
+                    CHANNEL_ID,
+                    "Screen Recording",
+                    NotificationManager.IMPORTANCE_LOW
+            );
+            NotificationManager manager = getSystemService(NotificationManager.class);
+            manager.createNotificationChannel(channel);
+        }
+    }
+
+    /**
+     * 创建通知
+     * @return 通知对象
+     */
+    private Notification createNotification() {
+        Notification.Builder builder;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            builder = new Notification.Builder(this, CHANNEL_ID);
+        } else {
+            builder = new Notification.Builder(this);
+        }
+        return builder
+                .setContentTitle("Screen Recording")
+                .setContentText("Recording in progress...")
+                .setSmallIcon(android.R.drawable.ic_dialog_info)
+                .build();
     }
 
     @Override
     public void onDestroy() {
         super.onDestroy();
+        Log.d(TAG, "onDestroy");
         stopRecording();
         if (mediaProjection != null) {
             mediaProjection.unregisterCallback(mediaProjectionCallback);
@@ -225,7 +380,6 @@ public class RecordService extends Service {
         }
         if (handlerThread != null) {
             handlerThread.quitSafely();
-            handlerThread = null;
         }
     }
 }

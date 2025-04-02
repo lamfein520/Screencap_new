@@ -15,6 +15,7 @@ import android.util.Log;
 import android.view.View;
 import android.widget.Button;
 import android.widget.Toast;
+
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.appcompat.app.AppCompatActivity;
@@ -24,8 +25,14 @@ import androidx.core.content.ContextCompat;
 import com.example.screepcap.R;
 import com.example.screepcap.service.RecordService;
 
+/**
+ * 主界面Activity
+ * 负责处理屏幕录制权限、服务绑定和录制控制
+ */
 public class MainActivity extends AppCompatActivity {
     private static final String TAG = "MainActivity";
+
+    // 需要申请的权限列表
     private static final String[] REQUIRED_PERMISSIONS = {
             Manifest.permission.FOREGROUND_SERVICE,
             Manifest.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION,
@@ -34,14 +41,22 @@ public class MainActivity extends AppCompatActivity {
             Manifest.permission.RECORD_AUDIO
     };
 
+    // UI组件
+    private Button recordButton;
+    
+    // 录制相关组件
     private MediaProjectionManager projectionManager;
     private MediaProjection mediaProjection;
     private RecordService recordService;
-    private boolean isServiceBound = false;
-    private Button recordButton;
-    private boolean isRecording = false;
     private Intent screenCaptureResultData;
+    
+    // 状态标志
+    private boolean isRecording = false;
+    private boolean isServiceBound = false;
 
+    /**
+     * 权限请求回调
+     */
     private final ActivityResultLauncher<String[]> permissionLauncher =
             registerForActivityResult(new ActivityResultContracts.RequestMultiplePermissions(),
                     permissions -> {
@@ -60,6 +75,9 @@ public class MainActivity extends AppCompatActivity {
                         }
                     });
 
+    /**
+     * 屏幕录制权限请求回调
+     */
     private final ActivityResultLauncher<Intent> screenCaptureCallback = registerForActivityResult(
             new ActivityResultContracts.StartActivityForResult(),
             result -> {
@@ -75,6 +93,9 @@ public class MainActivity extends AppCompatActivity {
             }
     );
 
+    /**
+     * 服务连接回调
+     */
     private final ServiceConnection serviceConnection = new ServiceConnection() {
         @Override
         public void onServiceConnected(ComponentName name, IBinder service) {
@@ -145,6 +166,9 @@ public class MainActivity extends AppCompatActivity {
         Log.d(TAG, "onStop");
     }
 
+    /**
+     * 处理录制按钮点击事件
+     */
     private void toggleRecording(View view) {
         Log.d(TAG, "toggleRecording: isRecording=" + isRecording);
         if (!isRecording) {
@@ -154,6 +178,9 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
+    /**
+     * 检查并请求必要的权限
+     */
     private void checkAndRequestPermissions() {
         Log.d(TAG, "Checking permissions");
         boolean allPermissionsGranted = true;
@@ -176,12 +203,18 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
+    /**
+     * 请求屏幕录制权限
+     */
     private void requestScreenCapture() {
         Log.d(TAG, "Requesting screen capture permission");
         Intent captureIntent = projectionManager.createScreenCaptureIntent();
         screenCaptureCallback.launch(captureIntent);
     }
 
+    /**
+     * 启动并绑定录制服务
+     */
     private void startAndBindService() {
         Log.d(TAG, "Starting and binding service");
         Intent serviceIntent = new Intent(this, RecordService.class);
@@ -195,6 +228,9 @@ public class MainActivity extends AppCompatActivity {
         bindService(serviceIntent, serviceConnection, BIND_AUTO_CREATE);
     }
 
+    /**
+     * 开始录制
+     */
     private void startRecording() {
         Log.d(TAG, "Starting recording");
         if (recordService != null && recordService.startRecording()) {
@@ -206,6 +242,9 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
+    /**
+     * 停止录制
+     */
     private void stopRecording() {
         Log.d(TAG, "Stopping recording");
         if (recordService != null) {
