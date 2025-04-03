@@ -53,6 +53,7 @@ public class ScreenRecordManager {
     // 单例实例
     private static volatile ScreenRecordManager instance;
     private VideoDataCallback callback;
+    private RecordStateCallback stateCallback;
 
     private ScreenRecordManager() {
     }
@@ -110,6 +111,27 @@ public class ScreenRecordManager {
     }
 
     /**
+     * 录制状态回调接口
+     */
+    public interface RecordStateCallback {
+        void onPrepared();              // 编码器准备完成
+        void onStart();                 // 录制开始
+        void onStop();                  // 录制停止
+        void onError(String error);     // 发生错误
+    }
+
+    private void setStateCallback(RecordStateCallback callback) {
+        this.stateCallback = callback;
+    }
+
+    private void notifyError(String error) {
+        if (stateCallback != null) {
+            stateCallback.onError(error);
+        }
+        Log.e(TAG, error);
+    }
+
+    /**
      * 准备视频编码器
      * @return 是否成功准备编码器
      */
@@ -129,9 +151,13 @@ public class ScreenRecordManager {
             inputSurface = encoder.createInputSurface();
             encoder.start();
             isPrepared.set(true);
+            if (stateCallback != null) {
+                stateCallback.onPrepared();
+            }
             return true;
         } catch (IOException e) {
-            Log.e(TAG, "prepareEncoder error: " + e.getMessage());
+            String error = "prepareEncoder error: " + e.getMessage();
+            notifyError(error);
             releaseEncoderResources();
             return false;
         }
@@ -261,15 +287,18 @@ public class ScreenRecordManager {
 
         try {
             if (!isPrepared.get() && !prepare()) {
-                Log.e(TAG, "Failed to prepare encoder");
+                notifyError("Failed to prepare encoder");
                 return;
             }
             createVirtualDisplay();
             isRecording.set(true);
             isProcessing.set(true);
             startEncodingLoop();
+            if (stateCallback != null) {
+                stateCallback.onStart();
+            }
         } catch (Exception e) {
-            Log.e(TAG, "Failed to start recording: " + e.getMessage());
+            notifyError("Failed to start recording: " + e.getMessage());
             stopRecording();
         }
     }
@@ -290,8 +319,11 @@ public class ScreenRecordManager {
                 // Give some time for the encoder to process remaining frames
                 Thread.sleep(500);
             }
+            if (stateCallback != null) {
+                stateCallback.onStop();
+            }
         } catch (Exception e) {
-            Log.e(TAG, "Failed to stop recording: " + e.getMessage());
+            notifyError("Failed to stop recording: " + e.getMessage());
         }
 
         releaseEncoderResources();
@@ -368,6 +400,13 @@ public class ScreenRecordManager {
          */
         public static void setCallback(VideoDataCallback callback) {
             getInstance().setCallback(callback);
+        }
+
+        /**
+         * 设置录制状态回调
+         */
+        public static void setStateCallback(RecordStateCallback callback) {
+            getInstance().setStateCallback(callback);
         }
     }
 }
