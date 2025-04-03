@@ -24,6 +24,8 @@ public class ScreenRecordManager {
 
     // MediaCodec 编码超时时间，单位：微秒
     private static final int TIMEOUT_US = 10000;
+    // 关键帧请求间隔时间，单位：毫秒
+    private static final long KEY_FRAME_INTERVAL_MS = 2000;
 
     // 屏幕捕获相关
     private MediaProjection mediaProjection;    // 用于获取屏幕内容
@@ -54,6 +56,9 @@ public class ScreenRecordManager {
     private static volatile ScreenRecordManager instance;
     private VideoDataCallback callback;
     private RecordStateCallback stateCallback;
+
+    // 记录上一次请求关键帧的时间
+    private long lastKeyFrameRequestTime = 0;
 
     private ScreenRecordManager() {
     }
@@ -232,6 +237,11 @@ public class ScreenRecordManager {
                 bufferInfo.size = 0;
             }
 
+            // 检查是否需要请求关键帧
+            if ((bufferInfo.flags & MediaCodec.BUFFER_FLAG_KEY_FRAME) == 0) {
+                requestKeyFrame();
+            }
+
             if (callback != null && bufferInfo.size > 0) {
                 callback.onVideoData(encodedData, bufferInfo);
             }
@@ -244,6 +254,27 @@ public class ScreenRecordManager {
         } catch (Exception e) {
             Log.e(TAG, "Unexpected error: " + e.getMessage());
             return false;
+        }
+    }
+
+    /**
+     * 请求生成关键帧
+     */
+    private void requestKeyFrame() {
+        if (encoder == null) return;
+        
+        long currentTime = System.currentTimeMillis();
+        // 检查是否达到请求间隔时间
+        if (currentTime - lastKeyFrameRequestTime >= KEY_FRAME_INTERVAL_MS) {
+            try {
+                Bundle params = new Bundle();
+                params.putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0);
+                encoder.setParameters(params);
+                lastKeyFrameRequestTime = currentTime;
+                Log.d(TAG, "Requested key frame");
+            } catch (Exception e) {
+                Log.e(TAG, "Failed to request key frame: " + e.getMessage());
+            }
         }
     }
 
@@ -412,6 +443,13 @@ public class ScreenRecordManager {
          */
         public static void setStateCallback(RecordStateCallback callback) {
             getInstance().setStateCallback(callback);
+        }
+
+        /**
+         * 强制请求关键帧
+         */
+        public static void forceKeyFrame() {
+            getInstance().requestKeyFrame();
         }
     }
 }
