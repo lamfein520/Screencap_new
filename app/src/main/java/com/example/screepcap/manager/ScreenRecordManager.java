@@ -298,18 +298,14 @@ public class ScreenRecordManager {
             } catch (Exception e) {
                 Log.e(TAG, "releaseEncoderResources encoder error: " + e.getMessage());
             }
-            encoder = null;
-        }
+                encoder = null;
+            }
 
         if (inputSurface != null) {
             inputSurface.release();
             inputSurface = null;
-        }
+    }
 
-        if (mediaProjection != null) {
-            mediaProjection.stop();
-            mediaProjection = null;
-        }
     }
 
     /**
