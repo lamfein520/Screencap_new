@@ -104,6 +104,7 @@ public class ScreenRecordManager {
      */
     public interface VideoDataCallback {
         void onVideoData(ByteBuffer buffer, MediaCodec.BufferInfo bufferInfo);
+        void onFormatChanged(MediaFormat format);  // 添加格式变更回调
     }
 
     private void setCallback(VideoDataCallback callback) {
@@ -212,6 +213,10 @@ public class ScreenRecordManager {
                 return true;
             } else if (outputBufferId == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
                 MediaFormat newFormat = encoder.getOutputFormat();
+                if (callback != null) {
+                    callback.onFormatChanged(newFormat);
+                }
+                Log.i(TAG, "Encoder output format changed: " + newFormat);
                 return true;
             } else if (outputBufferId < 0) {
                 Log.w(TAG, "Unexpected result from encoder.dequeueOutputBuffer: " + outputBufferId);
