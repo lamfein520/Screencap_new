@@ -26,7 +26,9 @@ public class ScreenRecordManager {
     private static final int TIMEOUT_US = 10000;
     // 关键帧请求间隔时间，单位：毫秒
     private static final long KEY_FRAME_INTERVAL_MS = 2000;
-
+    // 编码线程名称
+    private static final String ENCODING_THREAD_NAME = "ScreenRecording-Encoder";
+    
     // 屏幕捕获相关
     private MediaProjection mediaProjection;    // 用于获取屏幕内容
     private VirtualDisplay virtualDisplay;      // 虚拟显示器，用于承载屏幕内容
@@ -185,8 +187,12 @@ public class ScreenRecordManager {
      * 启动视频编码线程
      */
     private void startEncodingLoop() {
-        new Thread(() -> {
+        Thread encodingThread = new Thread(() -> {
             try {
+                // 设置线程优先级
+                android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_DISPLAY);
+                Thread.currentThread().setPriority(Thread.MAX_PRIORITY);
+                
                 while (isProcessing.get()) {
                     if (!encodeFrame()) {
                         break;
@@ -198,7 +204,9 @@ public class ScreenRecordManager {
                 releaseEncoderResources();
                 Log.i(TAG, "Encoding thread finished");
             }
-        }, "EncodingThread").start();
+        }, ENCODING_THREAD_NAME);
+        
+        encodingThread.start();
     }
     
     /**
