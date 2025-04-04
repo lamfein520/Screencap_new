@@ -48,9 +48,11 @@ public class AudioRecordManager {
     private MediaCodec audioEncoder;      // 音频编码器
     private Thread recordingThread;       // 录制线程
     private final AtomicBoolean isRecording = new AtomicBoolean(false);
+    private final AtomicBoolean isPrepared = new AtomicBoolean(false);  // 添加准备状态标志
     private AudioDataCallback callback;   // 数据回调接口
     private Context context;             // 上下文，用于权限检查
     private MediaProjection mediaProjection; // 用于内录
+    private static MediaFormat format;          // 音频格式
 
     /**
      * 私有构造函数，防止外部创建实例
@@ -111,7 +113,18 @@ public class AudioRecordManager {
      * 音频数据回调接口
      */
     public interface AudioDataCallback {
+        /**
+         * 当有新的音频数据可用时回调
+         * @param buffer 音频数据
+         * @param bufferInfo 音频数据信息
+         */
         void onAudioData(ByteBuffer buffer, MediaCodec.BufferInfo bufferInfo);
+
+        /**
+         * 当音频格式发生变化时回调
+         * @param format 新的音频格式
+         */
+        default void onFormatChanged(MediaFormat format) {}
     }
 
     /**
@@ -127,6 +140,11 @@ public class AudioRecordManager {
      * @return 是否初始化成功
      */
     private boolean prepare() {
+        if (isPrepared.get()) {
+            Log.d(TAG, "Already prepared");
+            return true;
+        }
+
         // 检查录音权限
         if (!checkAudioPermission()) {
             Log.e(TAG, "No audio permissions");
@@ -156,15 +174,16 @@ public class AudioRecordManager {
                     .setChannelMask(CHANNEL_CONFIG)
                     .build();
 
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                audioRecord = new AudioRecord.Builder()
-                        .setAudioFormat(audioFormat)
-                        .setBufferSizeInBytes(BUFFER_SIZE)
-                        .setAudioPlaybackCaptureConfig(config)
-                        .build();
+            AudioRecord.Builder builder = new AudioRecord.Builder()
+                    .setAudioFormat(audioFormat)
+                    .setBufferSizeInBytes(BUFFER_SIZE);
+
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q && config != null) {
+                builder.setAudioPlaybackCaptureConfig(config);
             }
 
-            // 检查音频录制器是否初始化成功
+            audioRecord = builder.build();
+            
             if (audioRecord.getState() != AudioRecord.STATE_INITIALIZED) {
                 Log.e(TAG, "AudioRecord initialization failed");
                 release();
@@ -172,7 +191,7 @@ public class AudioRecordManager {
             }
 
             // 初始化音频编码器
-            MediaFormat format = MediaFormat.createAudioFormat(MIME_TYPE, SAMPLE_RATE, 2); // 2 channels for stereo
+            format = MediaFormat.createAudioFormat(MIME_TYPE, SAMPLE_RATE, 2); // 2 channels for stereo
             format.setInteger(MediaFormat.KEY_AAC_PROFILE, 
                     MediaCodecInfo.CodecProfileLevel.AACObjectLC);
             format.setInteger(MediaFormat.KEY_BIT_RATE, AUDIO_BITRATE);
@@ -181,6 +200,12 @@ public class AudioRecordManager {
             audioEncoder = MediaCodec.createEncoderByType(MIME_TYPE);
             audioEncoder.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
 
+            // 通知音频格式已准备好
+            if (callback != null) {
+                callback.onFormatChanged(format);
+            }
+
+            isPrepared.set(true);
             return true;
         } catch (IOException e) {
             Log.e(TAG, "Failed to prepare audio recorder: " + e.getMessage());
@@ -193,8 +218,19 @@ public class AudioRecordManager {
      * 开始录制音频
      */
     private void startRecording() {
+        // 确保已经准备好
+        if (!isPrepared.get()) {
+            Log.e(TAG, "Cannot start recording - not prepared");
+            return;
+        }
+
         if (isRecording.get()) {
             Log.w(TAG, "Already recording");
+            return;
+        }
+
+        if (audioRecord == null || audioEncoder == null) {
+            Log.e(TAG, "Cannot start recording - recorder or encoder is null");
             return;
         }
 
@@ -204,8 +240,9 @@ public class AudioRecordManager {
             isRecording.set(true);
 
             // 启动录制线程
-            recordingThread = new Thread(this::recordingLoop, "AudioRecordThread");
+            recordingThread = new Thread(() -> recordingLoop(), "AudioRecordThread");
             recordingThread.start();
+            Log.i(TAG, "Audio recording started successfully");
         } catch (IllegalStateException e) {
             Log.e(TAG, "Failed to start recording: " + e.getMessage());
             stopRecording();
@@ -217,6 +254,7 @@ public class AudioRecordManager {
      */
     private void stopRecording() {
         isRecording.set(false);
+        isPrepared.set(false);  // 重置准备状态
         
         if (recordingThread != null) {
             try {
@@ -267,10 +305,7 @@ public class AudioRecordManager {
      * @return 音频MediaFormat，如果编码器未初始化则返回null
      */
     private MediaFormat getAudioFormat() {
-        if (audioEncoder != null) {
-            return audioEncoder.getOutputFormat();
-        }
-        return null;
+        return format;
     }
 
     /**
@@ -319,13 +354,13 @@ public class AudioRecordManager {
          * 初始化录制
          * @param context 应用上下文
          * @param projection MediaProjection对象
-         * @param callback 音频数据回调
+         * @param dataCallback 音频数据回调
          * @return 是否初始化成功
          */
-        public static boolean init(Context context, MediaProjection projection, AudioDataCallback callback) {
+        public static boolean init(Context context, MediaProjection projection, AudioDataCallback dataCallback) {
             AudioRecordManager manager = getInstance();
             manager.setContext(context, projection);
-            manager.setCallback(callback);
+            manager.setCallback(dataCallback);
             return manager.prepare();
         }
 
@@ -333,28 +368,43 @@ public class AudioRecordManager {
          * 开始录制
          */
         public static void start() {
-            getInstance().startRecording();
+            AudioRecordManager manager = getInstance();
+            if (!manager.isPrepared.get() && !manager.prepare()) {
+                Log.e(TAG, "Failed to prepare audio recorder");
+                return;
+            }
+            manager.startRecording();
         }
 
         /**
          * 停止录制
          */
         public static void stop() {
-            getInstance().stopRecording();
+            AudioRecordManager manager = getInstance();
+            manager.stopRecording();
         }
 
         /**
          * 获取音频格式
          */
         public static MediaFormat getFormat() {
-            return getInstance().getAudioFormat();
+            return format;
+        }
+
+        /**
+         * 检查音频格式是否准备好
+         * @return 如果音频格式已准备好返回true，否则返回false
+         */
+        public static boolean isFormatReady() {
+            return format != null;
         }
 
         /**
          * 释放资源
          */
         public static void release() {
-            getInstance().release();
+            AudioRecordManager manager = getInstance();
+            manager.release();
         }
     }
 }
