@@ -120,7 +120,7 @@ public class RecordService extends Service {
     }
 
     /**
-     * 设置屏幕录制配置
+     * 设置屏幕录制配置,初始化视频和音频录制管理器
      * @param projection MediaProjection 对象
      * @param width 屏幕宽度
      * @param height 屏幕高度
