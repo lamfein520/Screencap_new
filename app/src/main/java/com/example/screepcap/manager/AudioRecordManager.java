@@ -41,6 +41,9 @@ public class AudioRecordManager {
     private static final int AUDIO_BITRATE = 192000;   // 比特率
     private static final int MAX_INPUT_SIZE = 16384;
 
+    // 音频源类型
+    private static final int AUDIO_SOURCE_BELOW_Q = MediaRecorder.AudioSource.REMOTE_SUBMIX;
+
     // 单例实例
     private static volatile AudioRecordManager instance;
     
@@ -151,22 +154,7 @@ public class AudioRecordManager {
             return false;
         }
 
-        if (mediaProjection == null) {
-            Log.e(TAG, "MediaProjection is null");
-            return false;
-        }
-
         try {
-            // 配置内录
-            AudioPlaybackCaptureConfiguration config = null;
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
-                config = new AudioPlaybackCaptureConfiguration.Builder(mediaProjection)
-                        .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
-                        .addMatchingUsage(AudioAttributes.USAGE_GAME)
-                        .addMatchingUsage(AudioAttributes.USAGE_UNKNOWN)
-                        .build();
-            }
-
             // 初始化音频录制器
             AudioFormat audioFormat = new AudioFormat.Builder()
                     .setEncoding(AUDIO_FORMAT)
@@ -178,8 +166,21 @@ public class AudioRecordManager {
                     .setAudioFormat(audioFormat)
                     .setBufferSizeInBytes(BUFFER_SIZE);
 
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q && config != null) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                // Android 10 及以上使用 AudioPlaybackCaptureConfiguration
+                if (mediaProjection == null) {
+                    Log.e(TAG, "MediaProjection is null, required for Android 10 and above");
+                    return false;
+                }
+                AudioPlaybackCaptureConfiguration config = new AudioPlaybackCaptureConfiguration.Builder(mediaProjection)
+                        .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
+                        .addMatchingUsage(AudioAttributes.USAGE_GAME)
+                        .addMatchingUsage(AudioAttributes.USAGE_UNKNOWN)
+                        .build();
                 builder.setAudioPlaybackCaptureConfig(config);
+            } else {
+                // Android 10 以下使用 REMOTE_SUBMIX
+                builder.setAudioSource(AUDIO_SOURCE_BELOW_Q);
             }
 
             audioRecord = builder.build();
